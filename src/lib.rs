@@ -33,6 +33,11 @@ pub struct SchemaOptions {
     pub additional_properties: bool,
 }
 
+pub struct ExampleOptions {
+    pub count: usize,
+    pub valid: bool,
+}
+
 pub fn schema_from_source(source: &str, options: SchemaOptions) -> Result<Value, TsonError> {
     let mut parser = Parser::new();
     parser
@@ -126,6 +131,207 @@ pub fn schema_from_source(source: &str, options: SchemaOptions) -> Result<Value,
     }
 
     Ok(schema)
+}
+
+pub fn examples_from_schema(schema: &Value, options: ExampleOptions) -> Vec<Value> {
+    (0..options.count)
+        .map(|index| {
+            if options.valid {
+                valid_example(schema, schema, index)
+            } else {
+                invalid_example(schema, schema, index)
+            }
+        })
+        .collect()
+}
+
+fn valid_example(schema: &Value, root: &Value, index: usize) -> Value {
+    let schema = resolve_ref(schema, root);
+
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        if let Some(value) = values.get(index % values.len().max(1)) {
+            return value.clone();
+        }
+    }
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        if let Some(variant) = variants.get(index % variants.len().max(1)) {
+            return valid_example(variant, root, index);
+        }
+    }
+
+    match schema_type(schema).as_deref() {
+        Some("object") => valid_object(schema, root, index),
+        Some("array") => {
+            let item_schema = schema.get("items").unwrap_or(&Value::Null);
+            let len = (index % 2) + 1;
+            Value::Array(
+                (0..len)
+                    .map(|offset| valid_example(item_schema, root, index + offset))
+                    .collect(),
+            )
+        }
+        Some("string") => Value::String(format!("example-{}", index + 1)),
+        Some("number") => json!(index as f64 + 1.25),
+        Some("integer") => json!(index as i64 + 1),
+        Some("boolean") => Value::Bool(index % 2 == 0),
+        Some("null") => Value::Null,
+        _ => json!({ "example": index + 1 }),
+    }
+}
+
+fn valid_object(schema: &Value, root: &Value, index: usize) -> Value {
+    let mut object = Map::new();
+    let required = required_properties(schema);
+
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, property_schema) in properties {
+            if required.contains(name) || index % 2 == 0 {
+                object.insert(name.clone(), valid_example(property_schema, root, index));
+            }
+        }
+    }
+
+    if schema
+        .get("additionalProperties")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        object.insert(
+            format!("extra_{}", index + 1),
+            Value::String("additional value".to_string()),
+        );
+    }
+
+    Value::Object(object)
+}
+
+fn invalid_example(schema: &Value, root: &Value, index: usize) -> Value {
+    let schema = resolve_ref(schema, root);
+
+    if schema.get("const").is_some() || schema.get("enum").is_some() {
+        return invalid_scalar(schema);
+    }
+
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        if variants
+            .iter()
+            .any(|variant| schema_type(resolve_ref(variant, root)).as_deref() == Some("object"))
+        {
+            return Value::Array(vec![Value::String("invalid-union".to_string())]);
+        }
+        return json!({ "__tson_invalid": true });
+    }
+
+    match schema_type(schema).as_deref() {
+        Some("object") => invalid_object(schema, root, index),
+        Some("array") => invalid_scalar(schema),
+        Some(_) => invalid_scalar(schema),
+        None => Value::Null,
+    }
+}
+
+fn invalid_object(schema: &Value, root: &Value, index: usize) -> Value {
+    let required = required_properties(schema);
+    if index % 3 == 0 {
+        if let Some(name) = required.get(index % required.len().max(1)) {
+            if let Value::Object(mut object) = valid_object(schema, root, index) {
+                object.remove(name);
+                return Value::Object(object);
+            }
+        }
+    }
+
+    if index % 3 == 1 {
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            if let Some((name, property_schema)) =
+                properties.iter().nth(index % properties.len().max(1))
+            {
+                if let Value::Object(mut object) = valid_object(schema, root, index) {
+                    object.insert(name.clone(), invalid_example(property_schema, root, index));
+                    return Value::Object(object);
+                }
+            }
+        }
+    }
+
+    if schema
+        .get("additionalProperties")
+        .and_then(Value::as_bool)
+        .is_some_and(|allowed| !allowed)
+    {
+        if let Value::Object(mut object) = valid_object(schema, root, index) {
+            object.insert("__unexpected".to_string(), Value::Bool(true));
+            return Value::Object(object);
+        }
+    }
+
+    if let Some(name) = required.first() {
+        if let Value::Object(mut object) = valid_object(schema, root, index) {
+            object.remove(name);
+            return Value::Object(object);
+        }
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        if let Some((name, property_schema)) = properties.iter().next() {
+            if let Value::Object(mut object) = valid_object(schema, root, index) {
+                object.insert(name.clone(), invalid_example(property_schema, root, index));
+                return Value::Object(object);
+            }
+        }
+    }
+
+    Value::Array(vec![])
+}
+
+fn invalid_scalar(schema: &Value) -> Value {
+    match schema_type(schema).as_deref() {
+        Some("object") => Value::Array(vec![]),
+        Some("array") => Value::Object(Map::new()),
+        Some("string") => json!(123),
+        Some("number") | Some("integer") => Value::String("not-a-number".to_string()),
+        Some("boolean") => Value::String("not-a-boolean".to_string()),
+        Some("null") => Value::String("not-null".to_string()),
+        _ => Value::Null,
+    }
+}
+
+fn resolve_ref<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
+    let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
+        return schema;
+    };
+    let Some(pointer) = reference.strip_prefix('#') else {
+        return schema;
+    };
+    root.pointer(pointer).unwrap_or(schema)
+}
+
+fn schema_type(schema: &Value) -> Option<String> {
+    match schema.get("type") {
+        Some(Value::String(kind)) => Some(kind.clone()),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .find_map(Value::as_str)
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn required_properties(schema: &Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 struct Converter<'tree, 'src> {
@@ -544,5 +750,74 @@ mod tests {
             schema["$defs"]["Profile"]["properties"]["role"]["$ref"],
             "#/$defs/Role"
         );
+    }
+
+    #[test]
+    fn generates_valid_examples_from_schema() {
+        let source = r#"
+            type Role = "admin" | "user";
+            interface Profile { role: Role; active: boolean }
+            class User {
+              id: string;
+              age?: number;
+              profile: Profile;
+              tags: string[];
+            }
+        "#;
+
+        let schema = schema_from_source(
+            source,
+            SchemaOptions {
+                root_type: Some("User".to_string()),
+                additional_properties: false,
+            },
+        )
+        .unwrap();
+        let examples = examples_from_schema(
+            &schema,
+            ExampleOptions {
+                count: 2,
+                valid: true,
+            },
+        );
+
+        assert_eq!(examples.len(), 2);
+        assert!(examples[0]["id"].is_string());
+        assert!(examples[0]["age"].is_number());
+        assert!(examples[0]["profile"]["role"].is_string());
+        assert!(examples[0]["profile"]["active"].is_boolean());
+        assert!(examples[0]["tags"].is_array());
+        assert!(examples[1]["age"].is_null());
+    }
+
+    #[test]
+    fn generates_invalid_examples_from_schema() {
+        let source = r#"
+            class User {
+              id: string;
+              tags: string[];
+            }
+        "#;
+
+        let schema = schema_from_source(
+            source,
+            SchemaOptions {
+                root_type: Some("User".to_string()),
+                additional_properties: false,
+            },
+        )
+        .unwrap();
+        let examples = examples_from_schema(
+            &schema,
+            ExampleOptions {
+                count: 3,
+                valid: false,
+            },
+        );
+
+        assert_eq!(examples.len(), 3);
+        assert!(examples[0].get("id").is_none());
+        assert!(examples[1]["tags"].is_object());
+        assert_eq!(examples[2]["__unexpected"], true);
     }
 }

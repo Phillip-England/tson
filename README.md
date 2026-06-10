@@ -1,6 +1,6 @@
 # tson
 
-`tson` is a Rust CLI that reads TypeScript classes, interfaces, and type aliases and generates JSON Schema documents from their explicit type annotations.
+`tson` is a Rust CLI that reads TypeScript classes, interfaces, and type aliases and generates JSON Schema documents from their explicit type annotations. It can also generate JSON examples that should pass or fail validation against the generated schema.
 
 It is intended for workflows where TypeScript classes describe the data shape you accept or emit, and you want a JSON Schema file that can be used by validators such as Ajv.
 
@@ -47,6 +47,18 @@ You can also use the short default form:
 
 ```sh
 tson user.ts -c User -o user.schema.json
+```
+
+Generate valid example responses for the same type:
+
+```sh
+tson examples user.ts --class User --count 3 --out user.valid.json
+```
+
+Generate invalid examples that should be rejected by the schema:
+
+```sh
+tson examples user.ts --class User --count 3 --invalid --out user.invalid.json
 ```
 
 The generated schema will look like:
@@ -120,6 +132,43 @@ tson generate src/user.ts src/profile.ts src/role.ts --class User --out user.sch
 
 `tson` parses the files together and resolves type references across the provided files.
 
+## Examples
+
+The `examples` command emits a JSON array. By default, examples are valid:
+
+```sh
+tson examples user.ts --class User --count 5
+```
+
+Use `--invalid` to generate examples that intentionally violate the schema. Invalid examples rotate through common failure modes such as missing required fields, wrong property types, and unexpected properties when `additionalProperties` is `false`. You can also pass `--valid` explicitly, though valid examples are the default.
+
+```sh
+tson examples user.ts --class User --count 5 --invalid
+```
+
+Examples are generated from the same schema that `tson generate` produces, including `$defs`, arrays, nested objects, enums, constants, nullable unions, and optional properties.
+
+## Output Destinations
+
+Schema and example commands can write to stdout, files, the clipboard, or more than one destination:
+
+```sh
+# Print to stdout. This is the default when no destination is provided.
+tson generate user.ts --class User
+tson examples user.ts --class User --count 3
+
+# Save to a file.
+tson generate user.ts --class User --out user.schema.json
+tson examples user.ts --class User --count 3 --out user.examples.json
+
+# Copy to the clipboard.
+tson generate user.ts --class User --clipboard
+tson examples user.ts --class User --count 3 --clipboard
+
+# Combine destinations.
+tson examples user.ts --class User --count 3 --out user.examples.json --clipboard --print
+```
+
 ## Supported TypeScript Shapes
 
 `tson` currently supports:
@@ -140,13 +189,15 @@ Unsupported type expressions are kept permissive and include a `description` exp
 ## CLI
 
 ```sh
-tson generate <FILE>... [--class NAME] [--out FILE] [--allow-additional]
+tson generate <FILE>... [--class NAME] [--out FILE] [--clipboard] [--print] [--allow-additional]
 ```
 
 Options:
 
 - `-c, --class NAME`: root class or interface to generate. If omitted, `tson` uses the first class or interface found.
 - `-o, --out FILE`: write the schema to a file. If omitted, schema JSON is printed to stdout.
+- `--clipboard`: copy the schema JSON to the clipboard.
+- `--print`: print the schema JSON to stdout even when using `--out` or `--clipboard`.
 - `--allow-additional`: set `additionalProperties` to `true` on generated objects.
 
 The default invocation is equivalent to `generate`:
@@ -154,6 +205,23 @@ The default invocation is equivalent to `generate`:
 ```sh
 tson <FILE>... -c User -o user.schema.json
 ```
+
+Generate examples:
+
+```sh
+tson examples <FILE>... [--class NAME] [--count COUNT] [--valid | --invalid] [--out FILE] [--clipboard] [--print] [--allow-additional]
+```
+
+Options:
+
+- `-c, --class NAME`: root class or interface to generate examples for. If omitted, `tson` uses the first class or interface found.
+- `-n, --count COUNT`: number of examples to generate. Defaults to `3`.
+- `--valid`: generate examples that should pass validation. This is the default.
+- `--invalid`: generate examples that should fail validation.
+- `-o, --out FILE`: write the examples JSON array to a file. If omitted, examples are printed to stdout.
+- `--clipboard`: copy the examples JSON array to the clipboard.
+- `--print`: print the examples JSON array to stdout even when using `--out` or `--clipboard`.
+- `--allow-additional`: set `additionalProperties` to `true` before generating examples.
 
 ## Development
 
